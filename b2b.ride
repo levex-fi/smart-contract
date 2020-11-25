@@ -1,0 +1,636 @@
+{-# STDLIB_VERSION 4 #-}
+{-# CONTENT_TYPE DAPP #-}
+{-# SCRIPT_TYPE ACCOUNT #-}
+
+
+func SE(k:String, v: String) = StringEntry(k,v)
+func IE(k:String, v: Int) = IntegerEntry(k,v)
+func ST(a: Address, amt: Int, t: ByteVector | Unit) = ScriptTransfer(a, amt, t)
+func debug(k: String, v: String) = SE("__dbg__" + k, v)
+let ten6 = 1000000
+let ten8 = 100000000
+let MAX = 9223372036854775807
+
+let configProviderKey = "configProvider"
+let configProvider = match this.getString(configProviderKey) {
+  case s: String => addressFromStringValue(s)
+  case _ => this
+  }
+
+func localI(k: String, e: String) = this.getInteger(k).valueOrErrorMessage(e)
+func localS(k: String, e: String) = this.getString(k).valueOrErrorMessage(e)
+func confI(k: String, e: String) = configProvider.getInteger(k).valueOrErrorMessage(e)
+func confS(k: String, e: String) = configProvider.getString(k).valueOrErrorMessage(e)
+
+let BULLK = "BULLId"
+let BEARK = "BEARId"
+let USDNK = "mainTokenId"
+let BULLCOLK = "bullCollateral"
+let BEARCOLK = "bearCollateral"
+let BULLCIRCK = "bullCirculation"
+let BEARCIRCK = "bearCirculation"
+let ISSPERCK = "issuePercentile"
+let REDPERCK = "redeemPercentile"
+let MINISSK = "minIssue"
+let MINREDK = "minRedeem"
+let MINPOOLK = "minPool"
+let FEEACCK = "feesAccumulated"
+let WLISTK = "issueWhiteList"
+let REBPERCK = "rebalancePercentile"
+let REBIDXK = "lastSettlementPriceId"
+let HEADK = "headPointer"
+let TAILK = "tailPointer"
+let QSIZEK = "queueSize"
+let POOLUSDNK = "poolMainTokenValue"
+let POOLUPK = "poolUp"
+let POOLDWNK = "poolDwn"
+let POOLCIRCK = "poolTokenCirculation"
+let POOLK = "poolToken"
+let ASSNAMEK = "defoAssetName"
+let LEVK = "leverage"
+let WAVESFEEK = "wavesPacemakerFee"
+let USDNFEEK = "usdnPacemakerFee"
+let oraclePKKey = "oracle"
+func lastPriceIndexKey(assetId: String) = if (assetId == "") then "price_index" else "%s%s__idxCurrent__" + assetId
+func priceIndexPrefix(assetId: String) = if (assetId == "") then "price_index_" else "%s%s%d__idx2Height__"+ assetId + "__"
+func priceHeightPrefix(assetId: String) =if (assetId == "") then "price_" else "%s%s%d__priceByHeight__" + assetId + "__"
+
+let minUsdnFee = configProvider.getInteger(USDNFEEK).valueOrElse(0)
+let minWavesFee = configProvider.getInteger(WAVESFEEK).valueOrElse(0)
+
+let assetName = this.getString(ASSNAMEK).valueOrElse("")
+let bullCol = localI(BULLCOLK,"no 0")
+let bearCol = localI(BEARCOLK,"no 1")
+let bullCirc = localI(BULLCIRCK,"no 2")
+let bearCirc = localI(BEARCIRCK,"no 3")
+
+let BULL = localS(BULLK,"no 14")
+let BEAR = localS(BEARK,"no 15")
+let mainToken = localS(USDNK,"no 16")
+
+let issuePercentile = confI(ISSPERCK,"no 4")
+let redeemPercentile = confI(REDPERCK,"no 5")
+let minIssue = confI(MINISSK,"no 6")
+let minRedeem = confI(MINREDK,"no 7")
+let minPool = confI(MINPOOLK,"no 8")
+let rebalancePercentile = configProvider.getInteger(this.toString() + "_" + REBPERCK).valueOrElse(0)
+
+let whitelist = confS(WLISTK,"no 9")
+func allowed(a:Address) = whitelist == "" || whitelist.indexOf(a.toString()).isDefined()
+
+let poolMain = localI(POOLUSDNK,"no")
+let poolUp = localI(POOLUPK,"no 10")
+let poolDwn = localI(POOLDWNK,"no 11")
+let poolToken = localS(POOLK,"no 12")
+let poolTokenCirculation = localI(POOLCIRCK,"no 13")
+
+let poolBullExposure = fraction(bullCol, poolUp, bullCirc)
+let poolBearExposure = fraction(bearCol, poolDwn, bearCirc)
+let poolValue = poolMain + poolBullExposure  + poolBearExposure
+
+let oracle = addressFromPublicKey(
+        this
+        .getString(oraclePKKey)
+        .valueOrErrorMessage("no oraclePKKey")
+        .fromBase58String())
+    .valueOrErrorMessage("bad oracle address")
+
+let rebalancedPriceIndex = this
+    .getInteger(REBIDXK)
+    .valueOrErrorMessage("no last rebalance price")
+
+let oraclePriceIndex = oracle
+    .getInteger(lastPriceIndexKey(assetName))
+    .valueOrErrorMessage("bad oracle data at " +
+                          oracle.toString() + ": no integer at " +
+                          lastPriceIndexKey(assetName))
+
+let leverage = this.getInteger(LEVK).valueOrElse(3)
+
+func heightByIndex(assetName: String, priceIndex: Int) = oracle
+        .getInteger(priceIndexPrefix(assetName) + priceIndex.toString())
+        .valueOrErrorMessage("no data at index " + priceIndex.toString())
+func priceByHeight(assetName: String, priceHeight: Int) = oracle
+        .getInteger(priceHeightPrefix(assetName) + priceHeight.toString())
+        .valueOrErrorMessage("no data for height " + priceHeight.toString())
+
+func priceByIndex(assetName: String, priceIndex: Int) = priceByHeight(assetName, heightByIndex(assetName, priceIndex))
+
+
+let queueSize = this.getInteger(QSIZEK).valueOrElse(0)
+let headPointer = this.getString(HEADK).valueOrElse("")
+let tailPointer = this.getString(TAILK).valueOrElse("")
+let feesAccumulated = this.getInteger(FEEACCK).valueOrElse(0)
+
+let ISSUE = "ISSUE"
+let REDEEM = "REDEEM"
+let POOL = "POOL"
+let UNPOOL = "UNPOOL"
+
+let feeAddrKey = "feeAddress"
+let stakingAddrKey = "stakingAddress"
+let daemonPubKeyKey = "daemonPublicKey"
+
+let feeAddress = addressFromString(confS(feeAddrKey,"no feeAddress")).valueOrErrorMessage("bad feeAddress")
+let stakingAddress = confS(stakingAddrKey,"no stakingAddress")
+let daemonPublicKey = confS(daemonPubKeyKey,"no daemonPublicKey").fromBase58String()
+let rpdAddress = addressFromString("3PNikM6yp4NqcSU8guxQtmR5onr2D4e8yTJ")
+let admins = [
+        "2HHqV8W9DJayV5R6tBD2Sb8srphpoboDi7r1t1aPiumC",
+        "5ZXe82RRASU7qshXM2J9JNYhqJ9GWYjjVq2gwUV5Naz9",
+        "5WRXFSjwcTbNfKcJs8ZqXmSSWYsSVJUtMvMqZj5hH4Nc"
+]
+
+
+func buildNewItem(action: String, amt:Int, token:String, priceIndex: Int, invoker: String, minPayout: Int, maxPayout : Int) =
+    action + "|" + amt.toString() + "|" + token + "|" + priceIndex.toString() + "|" + invoker + "|" + minPayout.toString() + "|" + maxPayout.toString() + "|"
+
+func userDiffAbs() = {
+    let (userBullCol, userBearCol) = (bullCol - poolBullExposure, bearCol - poolBearExposure)
+    let diff = userBullCol - userBearCol
+    if(diff>0) then diff else 0 - diff
+}
+
+func maxIssue(tokenId: String) = {
+   let poolInvestment = if(poolUp> 0) then BULL else BEAR
+   if(tokenId != poolInvestment)
+       then poolMain
+       else userDiffAbs() + poolValue
+}
+
+func validatePMFee(i: Invocation, minPayout: Int) = {
+    if(minPayout < 0) then throw("negative min payout") else
+    let p = i.payments[1]
+    let ok = match p.assetId {
+        case bv: ByteVector => if(bv.toBase58String() == mainToken) then p.amount >= minUsdnFee else false
+        case waves: Unit => p.amount >= minWavesFee
+    }
+    if(!ok) then throw("incorrect pacemaker fee") else true
+}
+
+func validateRequestRedeem(inv: Invocation) = {
+    if(inv.caller == this) then throw("can't do") else
+    func errorMessage(got: String) = throw("bad token att: only BULL(" + BULL + ") or BEAR(" + BEAR + ") tokens are accepted, received: " + got)
+        let assetId = inv
+            .payments[0]
+            .value()
+            .assetId
+            .valueOrErrorMessage("bad token att")
+            .toBase58String()
+        if(assetId != BEAR && assetId != BULL ) then errorMessage(assetId) else
+            let attachedAmount = inv.payments[0].amount
+            let col = if(assetId == BEAR) then bearCol else bullCol
+            let circ = if(assetId == BEAR) then bearCirc else bullCirc
+            let estimated = fraction(col, attachedAmount, circ)
+            if(estimated < minRedeem)
+                then throw("Attached payment too small. Min redeem amount is " + (minRedeem/1000000).toString() + " USDN, " +
+                "attached amount: " + attachedAmount.toString() +
+                ", col: " + col.toString() +
+                ", circ: " + circ.toString() +
+                ", estimated: " + estimated.toString()
+                ) else
+           unit
+}
+
+func enqueue(id: String, action: String, amt: Int, token: String, priceIndex: Int, invoker: String, minPayout: Int, maxPayout: Int) = {
+    let increaseQueueSize = IE(QSIZEK, queueSize + 1)
+    let itm = buildNewItem(action, amt, token, priceIndex, invoker, minPayout, maxPayout)
+    if(queueSize == 0) then
+        # empty queue, setting up
+        [
+            SE(HEADK, id),
+            SE(TAILK, id),
+            SE(id, itm),
+            increaseQueueSize
+        ]
+    else
+        let prevId = localS(TAILK,"can't get tail pointer")
+        let prevItm = localS(prevId,"can't resolve pointer")
+        let updatedPrevItm = prevItm  + id
+        [
+            SE(prevId, updatedPrevItm),
+            SE(id, itm),
+            SE(TAILK, id),
+            increaseQueueSize
+        ]
+}
+
+func poolSupport(curBullCol0: Int, curBearCol0: Int, curBullCirc0: Int, curBearCirc0: Int, curPoolMain0: Int, curPoolUp0: Int, curPoolDwn0: Int) = {
+    func closeUp(c1: Int, c2: Int, a0: Int, a1: Int, c0: Int, pu: Int, pd: Int) = {
+        let diff = c1 - c2
+        let exp = fraction(c1, pu, a0)
+        let liquidatedTokens = if(exp < diff) then pu else fraction(diff, a0, c1)
+        let liquidatedValue = if(exp < diff) then exp else fraction(liquidatedTokens, c1, a0)
+        (c1 - liquidatedValue, c2, a0 - liquidatedTokens, a1, c0 + liquidatedValue, pu - liquidatedTokens, pd)
+    }
+    func closeDwn(c1: Int, c2: Int, a0: Int, a1: Int, c0: Int, pu: Int, pd: Int) = {
+        let diff = c2 - c1
+        let exp = fraction(c2, pd, a1)
+        let liquidatedTokens = if(exp < diff) then pd else fraction(diff, a1, c2)
+        let liquidatedValue = if(exp < diff) then exp else fraction(liquidatedTokens, c2, a1)
+        (c1, c2 - liquidatedValue, a0, a1 - liquidatedTokens, c0 + liquidatedValue, pu, pd - liquidatedTokens)
+    }
+    func openDwn(c1: Int, c2: Int, a0: Int, a1: Int, c0: Int, pu: Int, pd: Int) = {
+        let diff = c1 - c2
+        let spentPoolValue = if(diff < c0) then diff else c0
+        let acquiredTokens = fraction(spentPoolValue, a1, c2)
+        (c1, c2 + spentPoolValue, a0, a1 + acquiredTokens, c0 - spentPoolValue, pu, pd + acquiredTokens)
+    }
+    func openUp(c1: Int, c2: Int, a0: Int, a1: Int, c0: Int, pu: Int, pd: Int) = {
+        let diff = c2 - c1
+        let spentPoolValue = if(diff < c0) then diff else c0
+        let acquiredTokens = fraction(spentPoolValue, a0, c1)
+        (c1 + spentPoolValue, c2, a0 + acquiredTokens, a1, c0 - spentPoolValue, pu + acquiredTokens, pd)
+    }
+    let (c1,c2,a0,a1,c0,pu,pd) = if(curBullCol0 > curBearCol0) then {
+                    let afterCloseUp = closeUp(curBullCol0, curBearCol0, curBullCirc0, curBearCirc0, curPoolMain0, curPoolUp0, curPoolDwn0)
+                    let (a,b,c,d,e,f,g) = afterCloseUp
+                    # has poolUp tokens left, meaning it doesn't need to sell anymore so it's balanced
+                    if ( f > 0 ) then afterCloseUp
+                    else if ( f == 0 ) then openDwn(a,b,c,d,e,f,g)
+                    else throw("poolUp < 0")
+                } else {
+                    let afterCloseDwn = closeDwn(curBullCol0, curBearCol0, curBullCirc0, curBearCirc0, curPoolMain0, curPoolUp0, curPoolDwn0)
+                    let (a,b,c,d,e,f,g) = afterCloseDwn
+                     # has poolDwn tokens left, meaning it doesn't need to sell anymore so it's balanced
+                    if ( g > 0 ) then afterCloseDwn
+                    else if( g == 0 ) then openUp(a,b,c,d,e,f,g)
+                    else throw("poolDwn < 0")
+                }
+    let charge = fraction(userDiffAbs(), rebalancePercentile, 1440 * 100 *100)
+    let percentileActivated = height >= configProvider.getInteger("percentileActivationHeight").valueOrElse(10000000)
+    let c1SplitP = if (percentileActivated && pd > 0) then charge else 0  # not a typo:
+    let c2SplitP = if (percentileActivated && pu > 0) then charge else 0  # charging bears if pool has to buy bulls
+    (c1 - c1SplitP, c2 - c2SplitP, a0, a1, c0 + c1SplitP + c2SplitP, pu, pd)
+}
+
+func poolSup(curBullCol0: Int, curBearCol0: Int, curBullCirc0: Int, curBearCirc0: Int) = {
+        let (bullCol1, bearCol1, bullCic1, bearCirc1, poolMain1, poolUp1, poolDwn1) =
+            poolSupport(curBullCol0, curBearCol0, curBullCirc0, curBearCirc0, poolMain, poolUp, poolDwn)
+        [
+            IE(BULLCOLK, bullCol1),
+            IE(BULLCIRCK, bullCic1),
+            IE(BEARCOLK, bearCol1),
+            IE(BEARCIRCK, bearCirc1),
+            IE(POOLUSDNK, poolMain1),
+            IE(POOLUPK, poolUp1),
+            IE(POOLDWNK, poolDwn1)
+        ]
+}
+
+func dequeue() = {
+    func sp(a: Int, mx :Int) = if(a <= mx) then (a, 0) else (mx, a-mx)
+
+    if(queueSize == 0) then throw("nothing to settle") else
+        func collectFee(fees:Int) = IE(FEEACCK, feesAccumulated + fees)
+        let decreaseQueueSize = IE(QSIZEK, queueSize - 1)
+        let isLastElement = headPointer == tailPointer
+        let overwriteTail = SE(TAILK, "")
+        let dataStr = localS(headPointer,"bad head pointer(dequeue)")
+        let data = dataStr.split("|")
+        let action = data[0]
+        let amt = data[1].parseIntValue()
+        let token = data[2]
+        let priceIndex = data[3].parseIntValue()
+        let invoker = data[4].addressFromStringValue()
+        let minPayout = if(data.size() < 8 ) then 0 else data[5].parseIntValue()
+        let maxPayout = if(data.size() < 8 ) then MAX else data[6].parseIntValue()
+        let next = data[data.size() - 1]
+        func payback(tkn: String) = [
+                 SE(HEADK, next),
+                 decreaseQueueSize,
+                 ST(invoker, amt, tkn.fromBase58String())
+             ]
+        let items =
+            if(rebalancedPriceIndex > priceIndex) then
+                throw("corrupt state, rebalancedPriceIndex=" + rebalancedPriceIndex.toString() +", request price id=" + priceIndex.toString())
+            else if(rebalancedPriceIndex < priceIndex) then throw("can't dequeue, too early, rebalance first")
+            else if(action == ISSUE) then
+                let feeSize = fraction(amt, issuePercentile, 10000)
+                let addedCollateral = amt - feeSize
+                let a =
+                    if (token == BULL) then fraction(bullCirc, addedCollateral, bullCol) else
+                    if (token == BEAR) then fraction(bearCirc, addedCollateral, bearCol) else
+                    throw("bad token id")
+                let (addedToCirculation, extraTokens) = sp(a, maxPayout)
+                let (plusBulls, plusBullCol, plusBears, plusBearCol) = if (token == BULL) then (addedToCirculation, addedCollateral, 0, 0) else (0, 0, addedToCirculation, addedCollateral)
+                if(addedToCirculation < minPayout) then payback(mainToken) else
+                    poolSup(bullCol + plusBullCol, bearCol + plusBearCol, bullCirc + plusBulls, bearCirc + plusBears)
+                     ++ [
+                            SE(HEADK, next),
+                            collectFee(feeSize),
+                            decreaseQueueSize,
+                            ST(invoker, addedToCirculation, token.fromBase58String()),
+                            ST(feeAddress, extraTokens, token.fromBase58String())
+                        ]
+            else if (action == REDEEM) then
+                let removedTokens = amt
+                let calcPo =
+                    if(token == BULL) then fraction(bullCol, removedTokens, bullCirc) else
+                    if (token == BEAR) then fraction(bearCol, removedTokens, bearCirc) else
+                    throw("bad token id")
+                let (payoutCapped, extra) = sp(calcPo, maxPayout)
+                let feeSize = fraction(payoutCapped, redeemPercentile, 10000)
+                let payout = if(payoutCapped > feeSize) then payoutCapped - feeSize else 0
+                let (minusBulls, minusBullCol, minusBears, minusBearCol) = if (token == BULL) then (removedTokens, payoutCapped, 0, 0) else (0, 0, removedTokens, payoutCapped)
+                if(payout < minPayout) then payback(token) else
+                    poolSup(bullCol - minusBullCol, bearCol - minusBearCol, bullCirc - minusBulls, bearCirc - minusBears)
+                     ++ [
+                            SE(HEADK, next),
+                            collectFee(feeSize),
+                            decreaseQueueSize,
+                            ST(invoker, payout, mainToken.fromBase58String()),
+                            ST(feeAddress, extra, mainToken.fromBase58String())
+                    ]
+            else if (action == POOL) then
+                let issueTokens = fraction(poolTokenCirculation, amt, poolValue)
+                if(issueTokens < minPayout) then payback(mainToken) else
+                    [
+                        IE(POOLUSDNK, poolMain + amt),
+                        IE(POOLCIRCK, poolTokenCirculation + issueTokens),
+                        SE(HEADK, next),
+                        decreaseQueueSize,
+                        ST(invoker, issueTokens, poolToken.fromBase58String())
+                    ]
+            else if (action == UNPOOL) then
+                func share(a: Int) = fraction(a, amt, poolTokenCirculation)
+                let unpooledMain = share(poolMain)
+                let unpooledUp = share(poolUp)
+                let unpooledDwn = share(poolDwn)
+                let unpooledUpValue = fraction(unpooledUp, bullCol, bullCirc)
+                let unpooledDwnValue = fraction(unpooledDwn, bearCol, bearCirc)
+                let totalUnpooledValue = unpooledMain + unpooledUpValue + unpooledDwnValue
+                if(totalUnpooledValue < minPayout) then payback(poolToken) else
+                    [
+                        IE(POOLUSDNK, poolMain - unpooledMain),
+                        IE(POOLCIRCK, poolTokenCirculation - amt),
+                        IE(POOLUPK, poolUp - unpooledUp),
+                        IE(POOLDWNK, poolDwn - unpooledDwn),
+                        IE(BULLCIRCK, bullCirc - unpooledUp),
+                        IE(BEARCIRCK, bearCirc - unpooledDwn),
+                        IE(BULLCOLK, bullCol - unpooledUpValue),
+                        IE(BEARCOLK, bearCol - unpooledDwnValue),
+
+                        SE(HEADK, next),
+                        decreaseQueueSize,
+                        ST(invoker, totalUnpooledValue, mainToken.fromBase58String())
+                    ]
+            else throw("bad action: "+ action)
+        if isLastElement then overwriteTail :: items else items
+}
+
+
+func rebalance() = {
+    func LV(v: Int, p0: Int, p1:Int, m:Int) = {
+        # x = if (p1>p0) then p1/p0 - 1 else p0/p1 - 1
+        # L = 1 - 1/(m*m*x*x + m*x + 1)
+        # redist = L * v
+        # denom to prevent overflow
+        let denom = {
+            let md = 2 * (if(p1>p0) then p1 else p0) * m / 3037000499
+            if md < 10 then 10 else if md < 100 then 100 else 1000
+        }
+        let pmax = (if(p1>p0) then p1 else p0)/denom
+        let pmin = (if(p1<p0) then p1 else p0)/denom
+        let a = pmin*pmin
+        let b = m*m*pmax*pmax - (2*m*m  - m)*pmax*pmin
+        let ma = m*m-m
+        fraction(v, ma*a + b, (ma+1)*a + b)
+    }
+
+    let settledPriceIndex = this
+        .getInteger(REBIDXK)
+        .valueOrErrorMessage("inconsistent data")
+    let unsettledPriceIndex = settledPriceIndex + 1
+
+    let settledPrice = priceByIndex(assetName, settledPriceIndex)
+    let nextPrice = priceByIndex(assetName, unsettledPriceIndex)
+
+    let minVol = if(bullCol<bearCol) then bullCol else bearCol
+    let redist = LV(minVol, settledPrice, nextPrice, leverage)
+    let priceUpGoodForBulls = assetName == ""
+    let priceGoesUp = nextPrice > settledPrice
+    let bullsEarn = priceUpGoodForBulls == priceGoesUp
+    let newBullCol = if(bullsEarn) then bullCol + redist else bullCol - redist
+    let newBearCol = if(bullsEarn) then bearCol - redist else bearCol + redist
+    let (updBullCol, updBearCol, updBullCirc, updBearCirc, updPoolMain, updPoolUp, updPoolDwn)
+            = poolSupport(newBullCol, newBearCol, bullCirc, bearCirc, poolMain,poolUp, poolDwn)
+        [
+            IE(BULLCOLK, updBullCol),
+            IE(BEARCOLK, updBearCol),
+            IE(BULLCIRCK, updBullCirc),
+            IE(BEARCIRCK, updBearCirc),
+            IE(POOLUSDNK, updPoolMain),
+            IE(POOLUPK, updPoolUp),
+            IE(POOLDWNK, updPoolDwn),
+            IE(REBIDXK, unsettledPriceIndex)
+        ]
+}
+func calcMax(min: Int, avg: Int) = if (avg<min) then throw("price too old: minPayout " + min.toString() + " > avg = " + avg.toString()) else (avg + avg - min)
+func requestIssueInternal(inv: Invocation, tokenId: String, minPayout: Int) = {
+    if(tokenId != BULL && tokenId != BEAR) then throw("bad token req") else
+   if(inv.caller == this) then throw("can't do") else
+   if(!allowed(inv.caller)) then throw("only whitelisted can do") else
+   let errorMessage = "bad token req, only BULL(" + BULL + ") or BEAR(" + BEAR + ") allowed"
+   if(inv.payments[0].assetId != mainToken.fromBase58String()) then throw("bad token att") else
+   let amt = inv.payments[0].amount
+   let (col,circ) = if (tokenId == BULL) then (bullCol, bullCirc) else
+                    if (tokenId == BEAR) then (bearCol, bearCirc) else
+                    throw(errorMessage)
+   let est = fraction(amt, circ, col)
+   let (minP, maxP) = if(minPayout == 0) then (0, MAX)  else (minPayout, calcMax(minPayout, est))
+    if(amt < minIssue) then throw("Attached payment too small. Min required: " + (minIssue/1000000).toString() + " USDN")
+    else
+        let maxAllowed = maxIssue(tokenId)
+        ## everyone can, so should not exceed
+        if(whitelist == "" && inv.payments[0].amount > maxAllowed) then throw("trying to issue more than pool can handle. Max attachment allowed = " + (maxAllowed/1000000).toString() + " USDN")
+        else
+            enqueue(
+                inv.transactionId.toBase58String(),
+                ISSUE,
+                amt,
+                tokenId,
+                oraclePriceIndex + 1,
+                inv.caller.toString(),
+                minP, maxP) ++ [debug("requested", tokenId), debug("bull", BULL), debug("bear", BEAR)]
+}
+
+func requestRedeemInternal(inv:Invocation, minPayout: Int) = {
+      let amt = inv.payments[0].amount
+      let tokenId = inv.payments[0].assetId.valueOrErrorMessage("bad token att").toBase58String()
+      if(tokenId != BULL && tokenId != BEAR) then throw("bad token req") else
+      let (col,circ) = if(tokenId == BULL) then (bullCol, bullCirc) else if(tokenId == BEAR) then (bearCol, bearCirc) else throw("bad token req")
+      let est = fraction(amt, col, circ)
+      let (minP, maxP) = if(minPayout == 0) then (0, MAX)  else (minPayout, calcMax(minPayout, est))
+      if(validateRequestRedeem(inv) == unit)
+        then
+            enqueue(
+                inv.transactionId.toBase58String(),
+                REDEEM,
+                amt,
+                tokenId,
+                oraclePriceIndex + 1,
+                inv.caller.toString(),
+                minP, maxP)
+        else throw("doesn't happen")
+}
+
+func requestPoolInternal(inv: Invocation, minPayout: Int) = {
+    if(!allowed(inv.caller)) then throw("only whitelisted can do") else
+    let errMessage = "main token must be attached(" + mainToken + ")"
+    let pmt = inv.payments[0]
+    if(pmt.assetId != mainToken.fromBase58String()) then throw(errMessage) else
+    if(pmt.amount < minPool) then throw("pool at least " + minPool.toString() + " " + mainToken) else
+        let estimate = fraction(poolTokenCirculation, pmt.amount, poolValue)
+        let (minP, maxP) = if(minPayout == 0) then (0, MAX)  else (minPayout, calcMax(minPayout, estimate))
+        enqueue(inv.transactionId.toBase58String(),
+            POOL,
+            inv.payments[0].amount,
+            "",
+            oraclePriceIndex + 1,
+            inv.caller.toString(),
+            minP, maxP)
+}
+
+func requestUnpoolInternal(inv: Invocation, minPayout: Int) = {
+    let errMessage = "only pool token allowed(" + poolToken + ")"
+    let pmt = inv.payments[0]
+    if(pmt.assetId != poolToken.fromBase58String()) then throw(errMessage) else
+        let estimate = fraction(poolValue, pmt.amount, poolTokenCirculation)
+        if(estimate < minPool) then throw("unpool at least for" + minPool.toString() + " " + mainToken) else
+            let (minP, maxP) = if(minPayout == 0) then (0, MAX)  else (minPayout, calcMax(minPayout, estimate))
+            enqueue(inv.transactionId.toBase58String(),
+                UNPOOL,
+                inv.payments[0].amount,
+                "",
+                oraclePriceIndex + 1,
+                inv.caller.toString(),
+                minP, maxP)
+}
+
+
+@Callable(inv)
+func init(config: String, oraclePK: String,
+          nameup: String, namedwn: String, descUp: String, descDwn: String, poolName: String, poolDesc: String, defoAssetName: String,  denom: Int, lev: Int) = {
+    if(this.getString(BULLK).isDefined()) then throw("already initialized") else
+        let totalOwnedMainToken = inv.payments[0].amount
+        let bulls = totalOwnedMainToken / 3
+        let bears = bulls
+        let pools = totalOwnedMainToken - bulls - bears
+        if(bears == 0 || bulls == 0 || pools == 0 ) then throw("can't init balances") else
+            let oracleCurrentPriceIndex = addressFromPublicKey(oraclePK.fromBase58String())
+                        .valueOrErrorMessage("bad oracle address")
+                        .getInteger(lastPriceIndexKey(defoAssetName))
+                        .valueOrErrorMessage("can't find last oracle price index")
+            let bull = Issue(nameup,descUp,100*ten6*ten6,6,true)
+            let bear = Issue(namedwn,descDwn,100*ten6*ten6,6,true)
+            let pool = Issue(poolName,poolDesc,100*ten6*ten6,6,true)
+            let buid = calculateAssetId(bull)
+            let beid = calculateAssetId(bear)
+            let poid = calculateAssetId(pool)
+
+                [
+                    # issue tokens
+                    bull, bear, pool,
+                    # record token ids
+                    SE(BULLK, buid.toBase58String()),
+                    SE(BEARK, beid.toBase58String()),
+                    SE(USDNK, inv.payments[0].assetId.value().toBase58String()),
+                    SE(POOLK, poid.toBase58String()),
+                    SE(ASSNAMEK, defoAssetName),
+                    # oracle info
+                    SE(oraclePKKey, oraclePK),
+                    IE(REBIDXK, oracleCurrentPriceIndex),
+                    # token state
+                    IE(BULLCOLK, bulls),
+                    IE(BEARCOLK, bears),
+                    IE(BULLCIRCK, bulls/denom),
+                    IE(BEARCIRCK, bears/denom),
+                    IE(POOLCIRCK, pools/denom),
+                    IE(POOLDWNK, 0),
+                    IE(POOLUPK, 0),
+                    IE(POOLUSDNK, pools),
+                    # config
+                    SE(configProviderKey, config),
+                    IE(LEVK, lev),
+                    # token payout
+                    ST(inv.caller, bulls/denom, buid),
+                    ST(inv.caller, bears/denom, beid),
+                    ST(inv.caller, pools/denom, poid)
+                ]
+}
+
+
+@Callable(i)
+func withdrawFee(amount: Int) = {
+    if(amount > feesAccumulated) then throw("too much. available: " + feesAccumulated.toString())
+    else [
+        IE(FEEACCK,feesAccumulated - amount),
+        ST(feeAddress, amount, mainToken.fromBase58String())
+         ]
+}
+
+@Callable(inv)
+func requestRedeem() = requestRedeemInternal(inv, 0)
+
+@Callable(inv)
+func requestRedeemSl(sl: Int) = if(validatePMFee(inv, sl)) then requestRedeemInternal(inv, sl) else throw()
+
+@Callable(inv)
+func requestIssue(tokenId: String) = requestIssueInternal(inv, tokenId, 0)
+
+@Callable(inv)
+func requestIssueSl(tokenId: String, sl: Int) = if(validatePMFee(inv, sl)) then requestIssueInternal(inv, tokenId, sl) else throw()
+
+@Callable(inv)
+func requestPool() = requestPoolInternal(inv, 0)
+
+@Callable(inv)
+func requestPoolSl(sl: Int) = if(validatePMFee(inv, sl)) then requestPoolInternal(inv, sl) else throw()
+
+@Callable(inv)
+func requestUnpool() = requestUnpoolInternal(inv, 0)
+
+@Callable(inv)
+func requestUnpoolSl(sl: Int) =if(validatePMFee(inv, sl)) then requestUnpoolInternal(inv, sl) else throw()
+
+@Callable(inv)
+func settle() = {
+    let queueEmpty = headPointer == ""
+    let canRebalance = rebalancedPriceIndex < oraclePriceIndex
+    if(queueEmpty) then if(canRebalance) then rebalance() else throw("[OK] all done, carry on")
+    else
+        let data = this
+            .getString(headPointer)
+            .valueOrErrorMessage("bad head pointer(settle): " + headPointer)
+            .split("|")
+        let priceIndex = data[3].parseIntValue()
+        if(priceIndex > rebalancedPriceIndex) then if(canRebalance) then rebalance() else throw("[OK] need to wait")
+        else if(priceIndex == rebalancedPriceIndex) then dequeue()
+        else # priceIndex < rebalancedPriceIndex
+            throw("future price already rebalanced")
+}
+
+@Verifier(tx)
+func verify() = {
+    let initial = !this.getString(BULLK).isDefined() && sigVerify(tx.bodyBytes, tx.proofs[0], tx.senderPublicKey)
+
+    let adminAction =
+        ((if(sigVerify(tx.bodyBytes, tx.proofs[0], fromBase58String(admins[0]))) then 1 else 0) +
+        (if(sigVerify(tx.bodyBytes, tx.proofs[1], fromBase58String(admins[1]))) then 1 else 0) +
+        (if(sigVerify(tx.bodyBytes, tx.proofs[2], fromBase58String(admins[2]))) then 1 else 0)) > 1
+
+    let stakingAction = match tx {
+        case tx:InvokeScriptTransaction =>
+            let signedCorrectly = sigVerify(tx.bodyBytes, tx.proofs[0], daemonPublicKey)                                             # signed by daemon
+            let feesCorrect = tx.feeAssetId == unit && tx.fee <= 1000*1000                                                           # < 0.01 waves fee
+            let dappCorrect = tx.dApp == rpdAddress
+            let unlock = tx.function == "unlockNeutrino"
+            let lock = tx.function == "lockNeutrinoSP" && tx.args[0] == stakingAddress && wavesBalance(this).available >= ten8       # can lock if has enough waves for unlock later, 1 waves reserve
+            let funcCorrect = lock || unlock
+            signedCorrectly && feesCorrect && dappCorrect && funcCorrect
+        case _ => false
+      }
+
+    initial || adminAction || stakingAction
+}
